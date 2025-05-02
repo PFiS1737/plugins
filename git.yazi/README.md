@@ -21,10 +21,15 @@ Add the following to your `~/.config/yazi/init.lua`:
 -- This is the default options,
 -- you could call `setup` without arguments if you don't want to change them.
 require("git"):setup({
-   -- The order in which the status icon is displayed
+  -- The order in which the status icon is displayed
   order = 1500,
+
+  -- NOTE: The following options may cause performance issues.
+
   -- Whether to include `renamed` files in the status (or treat them as `deleted` and `added`)
   renamed = false,
+  -- Whether to highlight the text for lines have status
+  highlight = false,
 })
 ```
 

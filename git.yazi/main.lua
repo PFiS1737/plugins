@@ -10,6 +10,7 @@
 ---@class Options
 ---@field order number The order in which the status icon is displayed
 ---@field renamed boolean Whether to include `renamed` files in the status (or treat them as `deleted` and `added`)
+---@field highlight boolean Whether to highlight the text for lines have status
 
 local WINDOWS = ya.target_family() == "windows"
 
@@ -132,18 +133,28 @@ local add = ya.sync(function(st, cwd, repo, changed)
 	---@cast st State
 
 	st.dirs[cwd] = repo
-	st.repos[repo] = st.repos[repo] or {}
-	for path, code in pairs(changed) do
-		if code == CODES.unknown then
-			st.repos[repo][path] = nil
-		elseif code == CODES.excluded then
-			-- Mark the directory with a special value `excluded` so that it can be distinguished during UI rendering
-			st.dirs[path] = CODES.excluded
-		else
-			st.repos[repo][path] = code
+
+	if changed then
+		st.repos[repo] = st.repos[repo] or {}
+
+		for path, code in pairs(changed) do
+			if code == CODES.unknown then
+				st.repos[repo][path] = nil
+			elseif code == CODES.excluded then
+				-- Mark the directory with a special value `excluded` so that it can be distinguished during UI rendering
+				st.dirs[path] = CODES.excluded
+			else
+				st.repos[repo][path] = code
+			end
 		end
 	end
+
 	ya.render()
+
+	if st.opts.highlight then
+		-- Force a preview re-render
+		ya.mgr_emit("peek", { force = true })
+	end
 end)
 
 ---@param cwd string
@@ -181,6 +192,7 @@ local function setup(st, opts)
 	opts = opts or {}
 	opts.order = opts.order or 1500
 	opts.renamed = opts.renamed or false
+	opts.highlight = opts.highlight or false
 
 	st.opts = opts
 	st.dirs = {}
@@ -206,13 +218,33 @@ local function setup(st, opts)
 		[CODES.updated] = t.updated_sign or "",
 	}
 
-	Linemode:children_add(function(self)
-		local url = self._file.url
+	---@return CODES?
+	local function get_code(self)
+		local url = self._file.url ---@type Url
 		local repo = st.dirs[tostring(url.base)]
-		local code
 		if repo then
-			code = repo == CODES.excluded and CODES.ignored or st.repos[repo][tostring(url):sub(#repo + 2)]
+			local ret = repo == CODES.excluded and CODES.ignored or st.repos[repo][tostring(url):sub(#repo + 2)]
+			-- Check upward to see if the file belongs to an ignored folder, even if that folder hasn’t been visited
+			-- This is used to pre-fetch the file’s status in the preview tab
+			-- For folders that have already been visited, `propagate_down()` will be used
+			if not ret and opts.highlight then
+				local path = url.parent
+				---@diagnostic disable-next-line: param-type-mismatch
+				local repo_url = Url(repo)
+				while path and path ~= repo_url do
+					if st.repos[repo][tostring(path):sub(#repo + 2)] == CODES.ignored then
+						return CODES.ignored
+					end
+					path = path.parent
+				end
+			else
+				return ret
+			end
 		end
+	end
+
+	Linemode:children_add(function(self)
+		local code = get_code(self)
 
 		if not code or signs[code] == "" then
 			return ""
@@ -222,9 +254,33 @@ local function setup(st, opts)
 			return ui.Line { " ", ui.Span(signs[code]):style(styles[code]) }
 		end
 	end, opts.order)
+
+	if opts.highlight then
+		local entity_icon = Entity.icon
+		function Entity:icon()
+			local kind = get_code(self)
+			local icon = self._file:icon() ---@type Icon
+
+			return kind == CODES.ignored and icon.text .. " " or entity_icon(self)
+		end
+
+		local entity_style = Entity.style
+		function Entity:style()
+			local kind = get_code(self)
+			local ret = ui.Style(entity_style(self))
+
+			if not kind then
+				return ret
+			else
+				return ret:patch(styles[kind])
+			end
+		end
+	end
 end
 
 local function fetch(_, job)
+	local opts = get_opts()
+
 	local files = job.files ---@type File[]
 	local cwd = files[1].url.base
 	local repo = root(cwd)
@@ -243,7 +299,7 @@ local function fetch(_, job)
 		:args({ "--no-optional-locks", "-c", "core.quotePath=", "status", "--porcelain", "-unormal", "--ignored=matching" })
 		:stdout(Command.PIPED)
 
-	if get_opts().renamed then
+	if opts.renamed then
 		cmd = cmd:cwd(repo)
 	else
 		cmd = cmd:cwd(tostring(cwd)):args({ "--no-renames" }):args(paths)
@@ -277,6 +333,16 @@ local function fetch(_, job)
 	end
 
 	add(tostring(cwd), repo, changed)
+
+	if opts.highlight then
+		-- Link subdirectories to the repository,
+		-- so that we can see the text highlight of its children files
+		for _, file in ipairs(files) do
+			if file.cha.is_dir then
+				add(tostring(file.url), repo)
+			end
+		end
+	end
 
 	return false
 end
